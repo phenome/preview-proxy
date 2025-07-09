@@ -145,15 +145,20 @@ def cleanup_idle_resources():
 
             # Check which images are now fully idle (no running containers)
             images_to_remove = []
-            for image_name, last_used in resource_last_access.items():
+            images_to_untrack = []
+            for image_name, last_used in list(resource_last_access.items()):
                 if image_name not in active_images:
                     if (now - last_used > IMAGE_TIMEOUT):
                         if is_local_image(image_name):
                             print(f"Image '{image_name}' is local and will not be removed.")
-                            # Remove from tracking since we won't clean it up
-                            del resource_last_access[image_name]
+                            # Mark for removal from tracking since we won't clean it up
+                            images_to_untrack.append(image_name)
                         else:
                             images_to_remove.append(image_name)
+            
+            # Remove local images from tracking
+            for image_name in images_to_untrack:
+                del resource_last_access[image_name]
 
             for image_name in images_to_remove:
                 try:
