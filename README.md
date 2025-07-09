@@ -14,7 +14,7 @@ When the proxy server receives a request, it interprets the URL path to determin
     *   Start a new container from that image.
     *   Wait for the service inside the container to become healthy.
 3.  **Request Proxying**: Once the target container is running and healthy, the proxy forwards the request to it.
-4.  **Idle Cleanup**: The proxy monitors running containers and idle images. If a container or image is unused for a configurable period, it will be stopped and/or removed to save resources.
+4.  **Idle Cleanup**: The proxy monitors running containers and idle images. If a container is unused for a configurable period, it will be stopped. Remote images (from registries) that are unused will be removed to save resources, but local images are preserved since they cannot be pulled again.
 
 This allows you to have a single entry point that can serve multiple, independent applications, which are only started when they are actually needed.
 
@@ -52,7 +52,7 @@ The proxy's behavior can be customized using the following environment variables
 | `IMAGE` | A base image name to prepend to the tag found in the URL. If set to `my-org/my-app`, a request to `/v1/` will resolve to the image `my-org/my-app:v1`. | **Yes** | - |
 | `PORT` | The internal port that the spawned containers are expected to be listening on. | No | `80` |
 | `CONTAINER_TIMEOUT` | The number of seconds a container can be idle (no requests) before it is automatically stopped. | No | `300` (5 minutes) |
-| `IMAGE_TIMEOUT` | The number of seconds an image can be unused (no running containers) before it is removed from the host. | No | `1800` (30 minutes) |
+| `IMAGE_TIMEOUT` | The number of seconds a remote image can be unused (no running containers) before it is removed from the host. Local images are never removed. | No | `1800` (30 minutes) |
 
 ### Example: Running with custom configuration
 

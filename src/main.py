@@ -81,6 +81,33 @@ def get_container_name(image_tag):
     sanitized_tag = image_tag.replace('/', '--').replace(':', '-')
     return f"proxy-child-{sanitized_tag}"
 
+def is_local_image(image_name):
+    """Determines if an image is local (not from a remote registry)."""
+    try:
+        image_obj = client.images.get(image_name)
+        
+        # If the image has no RepoDigests, it's likely local (not pulled from registry)
+        if not image_obj.attrs.get('RepoDigests'):
+            return True
+            
+        # Check if any of the RepoDigests point to known registries
+        repo_digests = image_obj.attrs.get('RepoDigests', [])
+        for digest in repo_digests:
+            # If digest contains a known registry, it's remote
+            if any(registry in digest for registry in ['docker.io', 'ghcr.io', 'quay.io', 'gcr.io', 'ecr.']):
+                return False
+        
+        # If we get here, it's likely local
+        return True
+        
+    except docker.errors.ImageNotFound:
+        # If we can't find the image, assume it's local to be safe
+        return True
+    except Exception as e:
+        print(f"Error checking if image '{image_name}' is local: {e}")
+        # Default to local to be safe
+        return True
+
 def cleanup_idle_resources():
     """A background thread that stops idle containers and removes unused images."""
     print("Cleanup thread started.")
@@ -121,7 +148,12 @@ def cleanup_idle_resources():
             for image_name, last_used in resource_last_access.items():
                 if image_name not in active_images:
                     if (now - last_used > IMAGE_TIMEOUT):
-                        images_to_remove.append(image_name)
+                        if is_local_image(image_name):
+                            print(f"Image '{image_name}' is local and will not be removed.")
+                            # Remove from tracking since we won't clean it up
+                            del resource_last_access[image_name]
+                        else:
+                            images_to_remove.append(image_name)
 
             for image_name in images_to_remove:
                 try:
