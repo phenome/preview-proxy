@@ -8,19 +8,32 @@ from threading import Thread, Lock
 
 # --- Configuration from Environment Variables ---
 # The base URL path for the proxy. e.g., "preview" -> /preview/<tag>
-PROXY_BASE_PATH = os.environ.get('PROXY_BASE_PATH', '').strip('/')
+BASE_PATH = os.environ.get('BASE_PATH', '').strip('/')
 
 # The base Docker image. e.g., "my-org/my-app" -> my-org/my-app:<tag>
-PROXY_BASE_IMAGE = os.environ.get('PROXY_BASE_IMAGE', '')
+IMAGE = os.environ.get('IMAGE', '')
+
+# Validate required configuration
+if not BASE_PATH:
+    print("ERROR: BASE_PATH environment variable is required.")
+    print("Please set BASE_PATH to specify the URL prefix for proxy routes.")
+    print("Example: BASE_PATH=preview")
+    exit(1)
+
+if not IMAGE:
+    print("ERROR: IMAGE environment variable is required.")
+    print("Please set IMAGE to specify the base Docker image name.")
+    print("Example: IMAGE=my-org/my-app")
+    exit(1)
 
 # The port the target containers are expected to listen on.
-PROXY_TARGET_PORT = int(os.environ.get('PROXY_TARGET_PORT', 80))
+PORT = int(os.environ.get('PORT', 80))
 
 # How long a container can be idle before being stopped.
-CONTAINER_IDLE_TIMEOUT = int(os.environ.get('CONTAINER_IDLE_TIMEOUT', 300)) # 5 minutes
+CONTAINER_TIMEOUT = int(os.environ.get('CONTAINER_TIMEOUT', 300)) # 5 minutes
 
 # How long an image must be unused before being removed.
-IMAGE_IDLE_TIMEOUT = int(os.environ.get('IMAGE_IDLE_TIMEOUT', 1800)) # 30 minutes
+IMAGE_TIMEOUT = int(os.environ.get('IMAGE_TIMEOUT', 1800)) # 30 minutes
 
 # --- Static Configuration ---
 PROXY_SERVER_PORT = 80 # The port this proxy server itself listens on.
@@ -85,7 +98,7 @@ def cleanup_idle_resources():
                         continue
                     
                     last_used = resource_last_access.get(image_name)
-                    if last_used and (now - last_used > CONTAINER_IDLE_TIMEOUT):
+                    if last_used and (now - last_used > CONTAINER_TIMEOUT):
                         if container.status == 'running':
                             print(f"Container '{container.name}' for image '{image_name}' is idle. Stopping...")
                             container.stop()
@@ -107,7 +120,7 @@ def cleanup_idle_resources():
             images_to_remove = []
             for image_name, last_used in resource_last_access.items():
                 if image_name not in active_images:
-                    if (now - last_used > IMAGE_IDLE_TIMEOUT):
+                    if (now - last_used > IMAGE_TIMEOUT):
                         images_to_remove.append(image_name)
 
             for image_name in images_to_remove:
@@ -128,29 +141,16 @@ def cleanup_idle_resources():
 
 def resolve_image_and_path(path):
     """Determines the full Docker image name and remaining path based on configuration."""
-    if PROXY_BASE_IMAGE:
-        path_parts = path.strip('/').split('/')
-        tag = path_parts[0]
-        image_name = f"{PROXY_BASE_IMAGE}:{tag}"
-        remaining_path = "/".join(path_parts[1:])
-        return image_name, remaining_path
-    else:
-        path_parts = path.strip('/').split('/')
-        for i in range(len(path_parts), 0, -1):
-            image_candidate = "/".join(path_parts[:i])
-            try:
-                client.images.get(image_candidate)
-                return image_candidate, "/".join(path_parts[i:])
-            except docker.errors.ImageNotFound:
-                try:
-                    print(f"Pulling image '{image_candidate}'...")
-                    client.images.pull(image_candidate)
-                    return image_candidate, "/".join(path_parts[i:])
-                except docker.errors.ImageNotFound:
-                    continue
+    path_parts = path.strip('/').split('/')
+    if not path_parts or not path_parts[0]:
         return None, None
+    
+    tag = path_parts[0]
+    image_name = f"{IMAGE}:{tag}"
+    remaining_path = "/".join(path_parts[1:])
+    return image_name, remaining_path
 
-route_path = f"/{PROXY_BASE_PATH}/<path:path>" if PROXY_BASE_PATH else "/<path:path>"
+route_path = f"/{BASE_PATH}/<path:path>"
 
 @app.route(route_path, methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 def proxy(path):
@@ -193,8 +193,8 @@ def proxy(path):
                 )
                 print(f"Started container '{container_name}' ({target_container.short_id})")
                 start_time = time.time()
-                print(f"Waiting for service on port {PROXY_TARGET_PORT} in NEW container '{container_name}'...")
-                health_check_url = f"http://{container_name}:{PROXY_TARGET_PORT}/"
+                print(f"Waiting for service on port {PORT} in NEW container '{container_name}'...")
+                health_check_url = f"http://{container_name}:{PORT}/"
                 while time.time() - start_time < CONTAINER_STARTUP_TIMEOUT:
                     try:
                         requests.get(health_check_url, timeout=1, headers={'User-Agent': 'Docker-Proxy-Health-Check/1.0'})
@@ -217,7 +217,7 @@ def proxy(path):
     resource_last_access[image_name_found] = time.time()
 
     try:
-        target_url = f"http://{container_name}:{PROXY_TARGET_PORT}/{remaining_path}"
+        target_url = f"http://{container_name}:{PORT}/{remaining_path}"
         print(f"Proxying request for '{path}' to {target_url}")
         resp = requests.request(
             method=request.method,
@@ -236,14 +236,13 @@ def proxy(path):
         return "Error communicating with the service.", 502
 
 if __name__ == '__main__':
-    print("--- Dynamic Proxy Server (v7) ---")
-    print(f"Mode: {'Base Image' if PROXY_BASE_IMAGE else 'Full Path Resolution'}")
-    if PROXY_BASE_IMAGE:
-        print(f"-> Base Image: {PROXY_BASE_IMAGE}")
-        print(f"-> URL Structure: /{(PROXY_BASE_PATH + '/') if PROXY_BASE_PATH else ''}<tag>/<...>")
-    print(f"-> Target Port: {PROXY_TARGET_PORT}")
-    print(f"-> Container Idle Timeout: {CONTAINER_IDLE_TIMEOUT}s")
-    print(f"-> Image Idle Timeout: {IMAGE_IDLE_TIMEOUT}s")
+    print("--- Dynamic Proxy Server (v8) ---")
+    print(f"-> Base Path: /{BASE_PATH}")
+    print(f"-> Base Image: {IMAGE}")
+    print(f"-> URL Structure: /{BASE_PATH}/<tag>/<...>")
+    print(f"-> Target Port: {PORT}")
+    print(f"-> Container Timeout: {CONTAINER_TIMEOUT}s")
+    print(f"-> Image Timeout: {IMAGE_TIMEOUT}s")
     print("---------------------------------")
     
     ensure_network_exists()
