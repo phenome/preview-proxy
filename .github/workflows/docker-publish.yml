@@ -45,3 +45,5 @@ jobs:
           file: ./src/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache,mode=max
