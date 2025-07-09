@@ -23,9 +23,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=ref,prefix=
+            type=ref,event=branch,prefix=
             type=sha,prefix=
-            type=semver
+            type=semver,pattern={{version}}
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
