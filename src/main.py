@@ -5,6 +5,8 @@ import socket
 from flask import Flask, request, Response
 import requests
 from threading import Thread, Lock
+import signal
+import sys
 
 # --- Configuration from Environment Variables ---
 # The base URL path for the proxy. e.g., "preview" -> /preview/<tag>
@@ -178,8 +180,8 @@ def cleanup_idle_resources():
 
 def resolve_image_and_path(path):
     """Determines the full Docker image name and remaining path based on configuration."""
-    path_parts = path.strip('/').split('/')
-    if not path_parts or not path_parts[0]:
+    path_parts = [part for part in path.strip('/').split('/') if part]
+    if not path_parts:
         return None, None
     
     tag = path_parts[0]
@@ -256,6 +258,8 @@ def proxy(path):
     try:
         target_url = f"http://{container_name}:{PORT}/{remaining_path}"
         print(f"Proxying request for '{path}' to {target_url}")
+        
+        # Make the request to the target container
         resp = requests.request(
             method=request.method,
             url=target_url,
@@ -263,14 +267,135 @@ def proxy(path):
             data=request.get_data(),
             cookies=request.cookies,
             allow_redirects=False,
-            stream=True,
+            stream=True, # Stream the response
             timeout=(5, 30)
         )
-        return Response(resp.iter_content(chunk_size=1024), status=resp.status_code,
-                        headers=resp.headers.items(), content_type=resp.headers.get('Content-Type'))
+
+        content_type = resp.headers.get('Content-Type', '').lower()
+        
+        # Rewrite HTML and CSS to fix absolute paths
+        if 'text/html' in content_type or 'text/css' in content_type:
+            # Get the preview path e.g. /preview/pr123
+            preview_path = f"/{BASE_PATH}/{image_name_found.split(':')[-1]}"
+            
+            # Read the content and rewrite paths
+            content = resp.content.decode('utf-8', errors='ignore')
+            
+            # Regex to find src, href, and url attributes/functions with absolute paths
+            # It looks for:
+            # - src="/..."
+            # - href="/..."
+            # - url(/...)
+            # And replaces them with the prefixed path
+            import re
+            rewritten_content = re.sub(
+                r'(src|href|url)(\s*=\s*["\"]|\s*\()(/)',
+                f'\\1\\2{preview_path}/',
+                content
+            )
+            
+            # Create a new response with the rewritten content
+            # We need to remove the 'Content-Encoding', 'Content-Length', and 'Transfer-Encoding' headers 
+            # as the content has been modified
+            headers = {k: v for k, v in resp.headers.items() if k.lower() not in ['content-encoding', 'content-length', 'transfer-encoding']}
+            
+            # Inject JavaScript to rewrite API requests
+            if 'text/html' in content_type:
+                js_injection = f'''
+<script>
+    (function() {{
+        const originalFetch = window.fetch;
+        window.fetch = function(input, init) {{
+            let url = input;
+            if (typeof input === 'string' && url.startsWith('/api/chat')) {{
+                url = '{preview_path}' + url;
+            }}
+            return originalFetch(url, init);
+        }};
+
+        const originalXhrOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url, async, user, password) {{
+            if (typeof url === 'string' && url.startsWith('/api/chat')) {{
+                url = '{preview_path}' + url;
+            }}
+            originalXhrOpen.apply(this, [method, url, async, user, password]);
+        }};
+    }})();
+</script>
+'''
+                rewritten_content += js_injection
+            
+            return Response(rewritten_content, status=resp.status_code, headers=headers)
+        else:
+            # For non-HTML/CSS content, stream the response as-is
+            return Response(resp.iter_content(chunk_size=1024), status=resp.status_code,
+                            headers=resp.headers.items(), content_type=resp.headers.get('Content-Type'))
+
     except requests.exceptions.RequestException as e:
         print(f"ERROR: Failed to proxy request to '{container_name}': {e}")
         return "Error communicating with the service.", 502
+
+def handle_shutdown(signum, frame):
+    print(f"\nReceived signal {signum}. Initiating graceful shutdown...")
+    with container_lock:
+        # Stop and remove all proxy-managed containers
+        print("Stopping and removing all proxy-managed containers...")
+        for container in client.containers.list(filters={"label": "dev.gemini.proxy.image-name"}):
+            try:
+                print(f"Stopping container {container.name} ({container.short_id})...")
+                container.stop(timeout=5)
+                container.remove()
+                print(f"Container {container.name} removed.")
+            except docker.errors.NotFound:
+                print(f"Container {container.name} already gone.")
+            except Exception as e:
+                print(f"Error stopping/removing container {container.name}: {e}")
+
+        # Remove the Docker network
+        try:
+            network = client.networks.get(DOCKER_NETWORK)
+            if network:
+                print(f"Disconnecting proxy from network '{DOCKER_NETWORK}'...")
+                try:
+                    container_id = socket.gethostname()
+                    proxy_container = client.containers.get(container_id)
+                    network.disconnect(proxy_container)
+                    print("Proxy disconnected from network.")
+                except docker.errors.NotFound:
+                    print("Proxy container not found, skipping network disconnect.")
+                except Exception as e:
+                    print(f"Error disconnecting proxy from network: {e}")
+
+                print(f"Removing network '{DOCKER_NETWORK}'...")
+                network.remove()
+                print(f"Network '{DOCKER_NETWORK}' removed.")
+        except docker.errors.NotFound:
+            print(f"Network '{DOCKER_NETWORK}' not found, skipping removal.")
+        except Exception as e:
+            print(f"Error removing network '{DOCKER_NETWORK}': {e}")
+
+        # Remove images that were pulled by the proxy and are no longer in use
+        print("Removing unused images pulled by the proxy...")
+        for image_name in list(resource_last_access.keys()):
+            if not is_local_image(image_name):
+                try:
+                    client.images.remove(image=image_name, force=False)
+                    print(f"Image '{image_name}' removed.")
+                except docker.errors.ImageNotFound:
+                    pass # Already removed
+                except docker.errors.APIError as e:
+                    print(f"Could not remove image '{image_name}': {e.strerror}")
+                except Exception as e:
+                    print(f"An unexpected error occurred while removing image {image_name}: {e}")
+
+    print("Shutdown complete. Exiting.")
+    sys.exit(0)
+
+# Register signal handlers
+signal.signal(signal.SIGINT, handle_shutdown)
+signal.signal(signal.SIGTERM, handle_shutdown)
+
+# --- Main Proxy Logic ---
 
 if __name__ == '__main__':
     print("--- Dynamic Proxy Server (v8) ---")
