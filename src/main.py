@@ -228,7 +228,8 @@ def proxy(path):
                     name=container_name,
                     network=DOCKER_NETWORK,
                     remove=True,
-                    labels={"dev.gemini.proxy.image-name": image_name_found}
+                    labels={"dev.gemini.proxy.image-name": image_name_found},
+                    environment=os.environ.copy()
                 )
                 print(f"Started container '{container_name}' ({target_container.short_id})")
                 start_time = time.time()
